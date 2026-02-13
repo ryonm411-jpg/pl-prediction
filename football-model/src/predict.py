@@ -144,11 +144,20 @@ def predict_from_data(model, feature_cols):
     if not away_formation:
         away_formation = away_r.get("formation", "4-2-3-1")
 
+    # xG — use latest match xG as a baseline, or let user override
+    default_home_xg = home_r.get("xg", 1.2)
+    default_away_xg = away_r.get("xg", 1.2)
+    home_xg_input = input(f"Home expected xG (default {default_home_xg}): ").strip()
+    away_xg_input = input(f"Away expected xG (default {default_away_xg}): ").strip()
+    home_xg = float(home_xg_input) if home_xg_input else default_home_xg
+    away_xg = float(away_xg_input) if away_xg_input else default_away_xg
+
     feature_vector = build_feature_vector(
         home_r["ratings"], away_r["ratings"],
         home_formation, away_formation,
         is_home=1,
-        feature_cols=feature_cols
+        feature_cols=feature_cols,
+        home_xg=home_xg, away_xg=away_xg
     )
 
     run_prediction(model, feature_vector, home_name, away_name, feature_cols)
@@ -173,11 +182,18 @@ def predict_manual(model, feature_cols):
     home_formation = input("\nHome formation (e.g., 4-3-3): ").strip() or "4-3-3"
     away_formation = input("Away formation (e.g., 4-2-3-1): ").strip() or "4-2-3-1"
 
+    # xG input
+    home_xg_input = input("\nHome expected xG (e.g., 1.5, or press Enter for 1.2): ").strip()
+    away_xg_input = input("Away expected xG (e.g., 1.0, or press Enter for 1.2): ").strip()
+    home_xg = float(home_xg_input) if home_xg_input else 1.2
+    away_xg = float(away_xg_input) if away_xg_input else 1.2
+
     feature_vector = build_feature_vector(
         home_ratings, away_ratings,
         home_formation, away_formation,
         is_home=1,
-        feature_cols=feature_cols
+        feature_cols=feature_cols,
+        home_xg=home_xg, away_xg=away_xg
     )
 
     run_prediction(model, feature_vector, "Home Team", "Away Team", feature_cols)
@@ -223,7 +239,8 @@ def run_prediction(model, feature_vector, home_name, away_name, feature_cols):
 # Feature construction
 # ---------------------------------------------------------------------------
 
-def build_feature_vector(home_ratings, away_ratings, home_formation, away_formation, is_home, feature_cols):
+def build_feature_vector(home_ratings, away_ratings, home_formation, away_formation,
+                         is_home, feature_cols, home_xg=1.2, away_xg=1.2):
     """
     Construct a feature vector that matches the training data columns exactly.
 
@@ -250,6 +267,11 @@ def build_feature_vector(home_ratings, away_ratings, home_formation, away_format
         row[f"home_{safe_key}"] = h_val
         row[f"away_{safe_key}"] = a_val
         row[f"delta_{safe_key}"] = h_val - a_val
+
+    # xG features
+    row["home_xg"] = float(home_xg)
+    row["away_xg"] = float(away_xg)
+    row["delta_xg"] = float(home_xg) - float(away_xg)
 
     row["home_formation"] = FORMATION_MAP.get(home_formation, 0)
     row["away_formation"] = FORMATION_MAP.get(away_formation, 0)
@@ -289,19 +311,36 @@ def build_latest_ratings_lookup():
 
         starting = formations.get("starting", {})
 
+        # Parse xG from the match (e.g. "1.8 – 1.2")
+        home_xg, away_xg = _parse_xg_string(meta.get("xg", ""))
+
         if home_team and ratings.get("home"):
             team_data[home_team] = {
                 "ratings": ratings["home"],
                 "formation": starting.get("home", "4-3-3"),
+                "xg": home_xg,
             }
 
         if away_team and ratings.get("away"):
             team_data[away_team] = {
                 "ratings": ratings["away"],
                 "formation": starting.get("away", "4-2-3-1"),
+                "xg": away_xg,
             }
 
     return team_data
+
+
+def _parse_xg_string(xg_str):
+    """Parse xG string like '1.8 – 1.2' → (1.8, 1.2). Returns (1.2, 1.2) on failure."""
+    if not xg_str or not xg_str.strip():
+        return 1.2, 1.2
+    try:
+        normalized = xg_str.replace("\u2013", "-").replace("\u2014", "-").strip()
+        parts = normalized.split("-")
+        return float(parts[0].strip()), float(parts[1].strip())
+    except (ValueError, IndexError):
+        return 1.2, 1.2
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +348,7 @@ def build_latest_ratings_lookup():
 # ---------------------------------------------------------------------------
 
 def predict_match(home_ratings, away_ratings, home_formation="4-3-3",
-                  away_formation="4-2-3-1", is_home=1):
+                  away_formation="4-2-3-1", is_home=1, home_xg=1.2, away_xg=1.2):
     """
     Programmatic prediction interface.
 
@@ -319,6 +358,8 @@ def predict_match(home_ratings, away_ratings, home_formation="4-3-3",
         home_formation: string like "4-3-3"
         away_formation: string like "4-2-3-1"
         is_home: 1 if home, 0 if neutral
+        home_xg: expected goals for home team
+        away_xg: expected goals for away team
 
     Returns:
         dict with keys: home_win, draw, away_win, prediction
@@ -330,7 +371,8 @@ def predict_match(home_ratings, away_ratings, home_formation="4-3-3",
     feature_vector = build_feature_vector(
         home_ratings, away_ratings,
         home_formation, away_formation,
-        is_home, feature_cols
+        is_home, feature_cols,
+        home_xg=home_xg, away_xg=away_xg
     )
 
     X = np.array([feature_vector])

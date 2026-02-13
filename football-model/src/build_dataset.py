@@ -20,7 +20,6 @@ EXTENSIBILITY HOOKS (for later):
     - Add player-level features (avg squad rating)
     - Add rolling form (last N match ratings)
     - Add style-tag features (one-hot encode high_press, etc.)
-    - Add xG as a feature (requires parsing "1.8 – 1.2" string)
 
 BEGINNER NOTES:
     - "Delta" = difference.  If Home pressing = 85 and Away pressing = 60,
@@ -178,6 +177,12 @@ def process_match(match_path, teams_lookup):
         row[f"away_{safe_key}"] = a_val
         row[f"delta_{safe_key}"] = h_val - a_val
 
+    # xG (expected goals) — a strong predictor of true team quality
+    home_xg, away_xg = parse_xg(meta.get("xg", ""))
+    row["home_xg"] = home_xg
+    row["away_xg"] = away_xg
+    row["delta_xg"] = home_xg - away_xg
+
     # Formation encoding
     starting = formations.get("starting", {})
     row["home_formation"] = FORMATION_MAP.get(starting.get("home", ""), 0)
@@ -240,6 +245,37 @@ def get_rating_value(ratings_dict, category_name, default=50):
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def parse_xg(xg_str):
+    """
+    Parse an xG string like "1.8 – 1.2" into (home_xg, away_xg).
+
+    Handles multiple separator styles:
+        "1.8 – 1.2"   (en-dash, from your template)
+        "1.8 - 1.2"   (hyphen)
+        "1.8 — 1.2"   (em-dash)
+
+    Returns (0.0, 0.0) if the string is empty or unparseable.
+
+    Why xG matters:
+        xG measures the QUALITY of chances created, not just the
+        final score.  A team that wins 1-0 with xG of 0.3 was lucky;
+        a team that loses 0-1 with xG of 2.5 was unlucky.  Over time,
+        xG is a better predictor of future results than actual goals.
+    """
+    if not xg_str or not xg_str.strip():
+        return 0.0, 0.0
+
+    try:
+        # Normalize separators
+        normalized = xg_str.replace("–", "-").replace("—", "-").strip()
+        parts = normalized.split("-")
+        home_xg = float(parts[0].strip())
+        away_xg = float(parts[1].strip())
+        return home_xg, away_xg
+    except (ValueError, IndexError):
+        return 0.0, 0.0
 
 
 def parse_result(score_str):
