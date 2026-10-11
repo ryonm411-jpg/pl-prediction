@@ -77,6 +77,8 @@ def main():
     """
     Interactive prediction mode.
     """
+    # The Windows console defaults to cp1252, which can't print "→" or "Ø".
+    sys.stdout.reconfigure(encoding="utf-8")
     print("=" * 60)
     print("MATCH PREDICTION")
     print("=" * 60)

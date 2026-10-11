@@ -32,6 +32,7 @@ BEGINNER NOTES:
 
 import json
 import csv
+import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,8 @@ def main():
     """
     Entry point: orchestrates the full build pipeline.
     """
+    # The Windows console defaults to cp1252, which can't print "→" or "Ø".
+    sys.stdout.reconfigure(encoding="utf-8")
     print("=" * 60)
     print("BUILD DATASET")
     print("=" * 60)
