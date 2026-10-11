@@ -63,5 +63,5 @@ The long-run Home/Draw/Away frequencies from training seasons, predicted identic
 _Avoid_: Prior, naive model
 
 **Market Probabilities**:
-Bookmaker closing odds converted to Home/Draw/Away probabilities, with the bookmaker margin removed. This is the strongest Baseline and is not expected to be beaten.
+The average closing odds across bookmakers, converted to Home/Draw/Away probabilities with the bookmaker margin removed. This is the strongest Baseline and is not expected to be beaten.
 _Avoid_: Odds (when meaning probabilities), implied odds
