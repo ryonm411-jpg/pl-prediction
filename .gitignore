@@ -1,7 +1,14 @@
-env/.env
-env/credentials.json
-env/token.json
-env/tmp/
-env/logs/
+.venv/
+venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.DS_Store
+.env
+
+# Built artefacts: regenerate with the scripts in src/
+data/*.db
+data/models/
+data/datasets/
+data/raw_matches/
+data/teams.json
