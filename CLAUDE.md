@@ -13,6 +13,7 @@ Windows, using the venv at `.venv/`:
 ```
 .venv/Scripts/python src/fetch_data.py   # season CSVs -> data/raw/
 .venv/Scripts/python src/build_db.py     # data/raw/ -> data/epl.db (full rebuild)
+.venv/Scripts/python src/build_dataset.py  # matches -> match_features table
 .venv/Scripts/python -m pytest -q
 ```
 
@@ -20,4 +21,4 @@ Windows, using the venv at `.venv/`:
 
 ## In transition
 
-`build_dataset.py`, `train_model.py`, `evaluate.py` and `predict.py` still implement the old design, which used Tactical Ratings as features. They are being rewritten on top of `data/epl.db`. Treat them as reference, not as patterns to copy.
+`train_model.py`, `evaluate.py` and `predict.py` still implement the old design, which used Tactical Ratings as features. They are being rewritten on top of `data/epl.db`. Treat them as reference, not as patterns to copy.
