@@ -1,0 +1,34 @@
+{
+  "test_seasons": [
+    "2024-25",
+    "2025-26"
+  ],
+  "matches": 760,
+  "model": "Logistic regression",
+  "scores": [
+    {
+      "forecast": "Home win always",
+      "accuracy": 0.4171052632,
+      "log_loss": null,
+      "brier": 1.1657894737
+    },
+    {
+      "forecast": "Base Rates",
+      "accuracy": 0.4171052632,
+      "log_loss": 1.0830724066,
+      "brier": 0.656509738
+    },
+    {
+      "forecast": "Logistic regression",
+      "accuracy": 0.5065789474,
+      "log_loss": 1.0035286628,
+      "brier": 0.6018080083
+    },
+    {
+      "forecast": "Market Probabilities",
+      "accuracy": 0.525,
+      "log_loss": 0.9892501431,
+      "brier": 0.5914623829
+    }
+  ]
+}

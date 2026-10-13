@@ -62,14 +62,15 @@ class TeamForm:
         self.stats = deque([dict(record) for _ in range(STATS_WINDOW)], maxlen=STATS_WINDOW)
 
 
-def compute_features(matches: pd.DataFrame) -> pd.DataFrame:
+def compute_features(matches: pd.DataFrame, elo: EloTable | None = None) -> pd.DataFrame:
     """Return one row of Pre-match Features per Match.
 
     `matches` needs: match_id, season, match_date, home_team, away_team,
     home_goals, away_goals, result, home_shots_on_target, away_shots_on_target.
+    Pass a fresh `elo` table to try Elo settings other than the defaults.
     """
     matches = matches.sort_values(["match_date", "match_id"])
-    elo = EloTable()
+    elo = elo or EloTable()
     form: dict[str, TeamForm] = {}
     league: set[str] = set()
     rows = []

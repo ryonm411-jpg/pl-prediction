@@ -1,179 +1,134 @@
-"""
-evaluate.py
-===========
-PURPOSE:
-    Evaluate the trained model's performance on the dataset.
+"""Score the saved model on the test seasons, against every Baseline.
 
-WHAT IT PRODUCES:
-    1. Classification Report — precision, recall, F1-score per class
-    2. Confusion Matrix       — where predictions go right/wrong
-    3. Feature Importance Bar Chart (saved as PNG)
-    4. Probability Distribution — how confident the model is
-
-BEGINNER NOTES:
-    - "Precision" = of all the times the model predicted "Home Win",
-      how often was it actually a Home Win?
-    - "Recall" = of all actual Home Wins, how many did the model catch?
-    - "F1" = the harmonic mean of precision and recall.  Good single
-      metric when you care about both.
-    - With very few matches (< 20), these metrics won't be stable.
-      They become meaningful as you add more match analyses.
-
-EXTENSIBILITY:
-    - Add calibration curve plotting (requires matplotlib)
-    - Add Brier score (measures probability quality, not just accuracy)
-    - Add per-team breakdown (which teams are hardest to predict?)
+Run once, after train_model.py has picked and refit the model. Writes
+results/test_metrics.json plus two charts in results/.
 """
 
 import json
-import pandas as pd
-import numpy as np
+import sqlite3
+import sys
 from pathlib import Path
+
 import joblib
+import matplotlib
+import numpy as np
+import pandas as pd
 
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    accuracy_score,
-)
+from build_dataset import DB_PATH
+from modeling import (TEST_SEASONS, TRAIN_SEASONS, VALIDATION_SEASONS, base_rates, home_win_always, load_dataset,
+                      market_probabilities, predict, score, split)
+from train_model import MODEL_PATH, SELECTION_PATH
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent.parent
-DATASET_FILE = BASE_DIR / "data" / "datasets" / "training_data.csv"
-MODEL_FILE = BASE_DIR / "data" / "models" / "football_model.pkl"
-FEATURES_FILE = BASE_DIR / "data" / "models" / "feature_columns.json"
-PLOTS_DIR = BASE_DIR / "data" / "models"
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 
-# Human-readable labels for the 3 outcomes
-LABEL_NAMES = {0: "Away Win", 1: "Draw", 2: "Home Win"}
+RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
-
-def main():
-    print("=" * 60)
-    print("EVALUATE MODEL")
-    print("=" * 60)
-
-    # --- Load model and data ---
-    if not MODEL_FILE.exists():
-        print(f"[ERROR] Model not found: {MODEL_FILE}")
-        print("Run train_model.py first.")
-        return
-
-    model = joblib.load(MODEL_FILE)
-    df = pd.read_csv(DATASET_FILE)
-
-    with open(FEATURES_FILE, "r", encoding="utf-8") as f:
-        feature_cols = json.load(f)
-
-    X = df[feature_cols].values
-    y_true = df["result"].values
-
-    # --- Predictions ---
-    y_pred = model.predict(X)
-    y_proba = model.predict_proba(X)
-
-    # --- 1. Overall Accuracy ---
-    acc = accuracy_score(y_true, y_pred)
-    print(f"\nOverall Accuracy: {acc:.3f}  ({sum(y_true == y_pred)}/{len(y_true)} correct)")
-
-    # --- 2. Classification Report ---
-    # Map integer labels to human names for readability
-    target_names = [LABEL_NAMES.get(i, str(i)) for i in sorted(np.unique(y_true))]
-    print("\n--- Classification Report ---")
-    print(classification_report(y_true, y_pred, target_names=target_names, zero_division=0))
-
-    # --- 3. Confusion Matrix ---
-    cm = confusion_matrix(y_true, y_pred)
-    print("--- Confusion Matrix ---")
-    print(f"  (rows = actual, columns = predicted)")
-    present_labels = sorted(np.unique(y_true))
-    header = "           " + "  ".join(f"{LABEL_NAMES.get(l, str(l)):>9}" for l in present_labels)
-    print(header)
-    for i, row in enumerate(cm):
-        row_label = LABEL_NAMES.get(present_labels[i], str(present_labels[i]))
-        row_str = "  ".join(f"{v:>9}" for v in row)
-        print(f"  {row_label:>9} {row_str}")
-    print()
-
-    # --- 4. Probability Distribution ---
-    print("--- Prediction Probabilities (first 10 matches) ---")
-    print(f"  {'Match':<30} {'Home%':>6} {'Draw%':>6} {'Away%':>6}  {'Pred':>9}  {'Actual':>9}")
-    print(f"  {'-'*30} {'-----':>6} {'-----':>6} {'-----':>6}  {'-'*9}  {'-'*9}")
-
-    for i in range(min(10, len(df))):
-        home = df.iloc[i]["home_team"]
-        away = df.iloc[i]["away_team"]
-        match_label = f"{home} vs {away}"
-
-        # Probabilities — model.classes_ tells us which index = which class
-        proba = y_proba[i]
-        classes = model.classes_
-        prob_dict = {int(classes[j]): proba[j] for j in range(len(classes))}
-
-        home_pct = prob_dict.get(2, 0) * 100
-        draw_pct = prob_dict.get(1, 0) * 100
-        away_pct = prob_dict.get(0, 0) * 100
-
-        pred_label = LABEL_NAMES.get(y_pred[i], "?")
-        true_label = LABEL_NAMES.get(y_true[i], "?")
-
-        print(f"  {match_label:<30} {home_pct:>5.1f}% {draw_pct:>5.1f}% {away_pct:>5.1f}%  {pred_label:>9}  {true_label:>9}")
-
-    # --- 5. Feature Importance (try to plot) ---
-    try:
-        save_feature_importance_plot(model, feature_cols)
-    except Exception as e:
-        print(f"\n[NOTE] Could not generate importance plot: {e}")
-
-    print("\nEvaluation complete.")
+# Chart tokens (light surface, validated categorical slots 1 and 2).
+SURFACE, INK, INK_MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+MODEL_COLOR, MARKET_COLOR, BASELINE_COLOR = "#2a78d6", "#eb6834", "#b5b4ae"
 
 
-def save_feature_importance_plot(model, feature_cols):
-    """
-    Attempt to extract and plot feature importances.
+def main() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        df = load_dataset(conn)
+    history = split(df, TRAIN_SEASONS + VALIDATION_SEASONS)
+    test = split(df, TEST_SEASONS)
+    assert test[["market_avg_close_home", "market_avg_close_draw", "market_avg_close_away"]].notna().all().all()
 
-    CalibratedClassifierCV wraps the base estimator, so we need
-    to dig into it to get .feature_importances_.
-    """
-    import matplotlib
-    matplotlib.use("Agg")  # Non-interactive backend (no GUI needed)
-    import matplotlib.pyplot as plt
+    model = joblib.load(MODEL_PATH)
+    model_name = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))["selected"]
 
-    # Extract the base RandomForest from inside the calibrated wrapper
-    if hasattr(model, "estimator"):
-        # scikit-learn >= 1.2
-        base = model.estimator
-    elif hasattr(model, "base_estimator"):
-        # older scikit-learn
-        base = model.base_estimator
-    elif hasattr(model, "feature_importances_"):
-        base = model
-    else:
-        print("\n[NOTE] Model type doesn't expose feature importances directly.")
-        return
+    forecasts = {
+        "Home win always": home_win_always(len(test)),
+        "Base Rates": base_rates(history, len(test)),
+        model_name: predict(model, test),
+        "Market Probabilities": market_probabilities(test),
+    }
+    table = pd.DataFrame([{"forecast": name, **score(test["result"], p)} for name, p in forecasts.items()])
+    print(f"Test seasons: {', '.join(TEST_SEASONS)} ({len(test)} matches)\n")
+    print(table.to_string(index=False, float_format="%.4f"))
 
-    if not hasattr(base, "feature_importances_"):
-        print("\n[NOTE] Base model has no feature_importances_ attribute.")
-        return
+    base = table.set_index("forecast").loc["Base Rates", "log_loss"]
+    ours = table.set_index("forecast").loc[model_name, "log_loss"]
+    market = table.set_index("forecast").loc["Market Probabilities", "log_loss"]
+    print(f"\nLog loss vs Base Rates: {ours - base:+.4f} ({(ours - base) / base:+.1%})")
+    print(f"Log loss vs market:     {ours - market:+.4f}")
 
-    importances = base.feature_importances_
-    sorted_idx = np.argsort(importances)
+    RESULTS_DIR.mkdir(exist_ok=True)
+    (RESULTS_DIR / "test_metrics.json").write_text(json.dumps({
+        "test_seasons": TEST_SEASONS,
+        "matches": len(test),
+        "model": model_name,
+        # Log loss is infinite for "Home win always" (it gives 0% to Results that happen).
+        "scores": json.loads(table.replace([np.inf], None).to_json(orient="records")),
+    }, indent=2), encoding="utf-8")
 
-    fig, ax = plt.subplots(figsize=(10, max(4, len(feature_cols) * 0.4)))
-    ax.barh(range(len(sorted_idx)), importances[sorted_idx], color="#4C72B0")
-    ax.set_yticks(range(len(sorted_idx)))
-    ax.set_yticklabels([feature_cols[i] for i in sorted_idx])
-    ax.set_xlabel("Importance")
-    ax.set_title("Feature Importance — Which tactical ratings matter most?")
-    plt.tight_layout()
+    plot_log_loss(table[table["forecast"] != "Home win always"], model_name)
+    plot_calibration(test, forecasts[model_name], forecasts["Market Probabilities"], model_name)
+    print(f"\nWrote {RESULTS_DIR / 'test_metrics.json'} and charts to {RESULTS_DIR}")
 
-    plot_path = PLOTS_DIR / "feature_importance.png"
-    fig.savefig(plot_path, dpi=150)
+
+def style(ax) -> None:
+    ax.set_facecolor(SURFACE)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    ax.tick_params(colors=INK_MUTED, labelsize=10)
+    ax.grid(color=GRID, linewidth=1)
+    ax.set_axisbelow(True)
+
+
+def plot_log_loss(table: pd.DataFrame, model_name: str) -> None:
+    colors = {model_name: MODEL_COLOR, "Market Probabilities": MARKET_COLOR}
+    fig, ax = plt.subplots(figsize=(8, 2.8), facecolor=SURFACE)
+    style(ax)
+    ax.grid(axis="y", visible=False)
+    labels = list(table["forecast"])
+    bars = ax.barh(labels, table["log_loss"], height=0.55,
+                   color=[colors.get(f, BASELINE_COLOR) for f in labels])
+    for bar, value in zip(bars, table["log_loss"]):
+        ax.text(value + 0.01, bar.get_y() + bar.get_height() / 2, f"{value:.3f}",
+                va="center", color=INK, fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.2)
+    ax.set_xlabel("Log loss on 2024-25 and 2025-26 (lower is better)", color=INK_MUTED)
+    ax.set_title("Test-season log loss", loc="left", color=INK, fontsize=12, fontweight="bold")
+    ax.tick_params(axis="y", colors=INK)
+    fig.tight_layout()
+    fig.savefig(RESULTS_DIR / "log_loss.png", dpi=150)
     plt.close(fig)
-    print(f"\nFeature importance plot saved to {plot_path}")
+
+
+def calibration_points(results: pd.Series, p_home: np.ndarray, bins: int = 10) -> pd.DataFrame:
+    """Mean predicted vs observed home-win rate in equal-sized probability bins."""
+    df = pd.DataFrame({"p": p_home, "home_win": (results.to_numpy() == "H").astype(float)})
+    df["bin"] = pd.qcut(df["p"], bins, labels=False, duplicates="drop")
+    return df.groupby("bin").agg(predicted=("p", "mean"), observed=("home_win", "mean"))
+
+
+def plot_calibration(test: pd.DataFrame, model_p: np.ndarray, market_p: np.ndarray, model_name: str) -> None:
+    fig, ax = plt.subplots(figsize=(5.5, 5.5), facecolor=SURFACE)
+    style(ax)
+    ax.plot([0, 1], [0, 1], color=INK_MUTED, linewidth=1, label="Perfectly calibrated")
+    for name, p, color in [(model_name, model_p, MODEL_COLOR), ("Market Probabilities", market_p, MARKET_COLOR)]:
+        pts = calibration_points(test["result"], p[:, 2])
+        ax.plot(pts["predicted"], pts["observed"], color=color, linewidth=2, marker="o", markersize=7,
+                markeredgecolor=SURFACE, markeredgewidth=2, label=name)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Predicted home-win probability", color=INK_MUTED)
+    ax.set_ylabel("Actual home-win rate", color=INK_MUTED)
+    ax.set_title("Calibration on test seasons (10 equal-sized bins)", loc="left", color=INK,
+                 fontsize=12, fontweight="bold")
+    legend = ax.legend(loc="upper left", frameon=False, fontsize=10)
+    for text in legend.get_texts():
+        text.set_color(INK)
+    fig.tight_layout()
+    fig.savefig(RESULTS_DIR / "calibration.png", dpi=150)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

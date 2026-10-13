@@ -1,156 +1,67 @@
-"""
-train_model.py
-==============
-PURPOSE:
-    Train a probabilistic classifier on the tactical features
-    produced by build_dataset.py.
+"""Pick a model on the validation seasons, then refit it for the test run.
 
-MODEL CHOICE — RandomForestClassifier:
-    - Handles non-linear relationships (e.g., pressing delta matters
-      more when combined with high chance creation).
-    - Provides built-in feature importance (so you can see WHICH
-      tactical ratings drive predictions the most).
-    - Robust to small datasets — doesn't overfit as easily as deep
-      learning.
-    - Easy to swap later for XGBoost / LightGBM without changing
-      the rest of the pipeline.
+1. Fit each candidate model on the training seasons and score it on the
+   validation seasons. Log loss decides: it rewards honest probabilities, not
+   just picking the most likely Result.
+2. Refit the winner on training + validation seasons and save it to
+   data/models/model.joblib. src/evaluate.py scores it on the test seasons once.
 
-CALIBRATION:
-    Raw RandomForest probabilities are often poorly calibrated
-    (e.g., it says "70% home win" but the true rate is only 55%).
-    We wrap the model in CalibratedClassifierCV to fix this.
-
-OUTPUT:
-    data/models/football_model.pkl   — the trained (calibrated) model
-    data/models/feature_columns.json — list of feature column names
-                                       (needed by predict.py)
-
-BEGINNER NOTES:
-    - "Fitting" = training.  model.fit(X, y) means "learn patterns
-      from features X that predict labels y".
-    - "pkl" = pickle, Python's way of saving objects to disk.
-    - We use joblib instead of pickle because it handles numpy
-      arrays more efficiently.
-    - max_depth=8 limits tree depth to prevent overfitting on small
-      datasets.  Increase this as you add more match data.
+The test seasons are never loaded here.
 """
 
 import json
-import pandas as pd
-import numpy as np
+import sqlite3
+import sys
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import train_test_split
+
 import joblib
+import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent.parent
-DATASET_FILE = BASE_DIR / "data" / "datasets" / "training_data.csv"
-MODEL_DIR = BASE_DIR / "data" / "models"
-MODEL_FILE = MODEL_DIR / "football_model.pkl"
-FEATURES_FILE = MODEL_DIR / "feature_columns.json"
+from build_dataset import DB_PATH, FEATURE_COLUMNS
+from modeling import (TRAIN_SEASONS, VALIDATION_SEASONS, base_rates, candidate_models, fit, load_dataset,
+                      predict, score, split)
 
-# Columns that are NOT features (identifiers + the target)
-NON_FEATURE_COLS = ["match_id", "date", "home_team", "away_team", "result"]
-
-# Model hyperparameters — tuned conservatively for small datasets.
-# Increase n_estimators and max_depth as your dataset grows.
-RF_PARAMS = {
-    "n_estimators": 200,       # number of trees in the forest
-    "max_depth": 8,            # max splits per tree (prevents overfitting)
-    "min_samples_split": 3,    # minimum samples to split a node
-    "min_samples_leaf": 2,     # minimum samples in a leaf
-    "class_weight": "balanced", # handles imbalanced classes (fewer draws)
-    "random_state": 42,        # reproducibility
-    "n_jobs": -1,              # use all CPU cores
-}
-
-TEST_SIZE = 0.2  # 20% of data held out for evaluation
+MODEL_DIR = Path(__file__).resolve().parent.parent / "data" / "models"
+MODEL_PATH = MODEL_DIR / "model.joblib"
+SELECTION_PATH = MODEL_DIR / "selection.json"
 
 
-def main():
-    print("=" * 60)
-    print("TRAIN MODEL")
-    print("=" * 60)
+def main() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        df = load_dataset(conn)
+    train, validation = split(df, TRAIN_SEASONS), split(df, VALIDATION_SEASONS)
+    print(f"Train: {len(train)} matches ({TRAIN_SEASONS[0]} to {TRAIN_SEASONS[-1]})")
+    print(f"Validation: {len(validation)} matches ({', '.join(VALIDATION_SEASONS)})\n")
 
-    # --- Step 1: Load dataset ---
-    if not DATASET_FILE.exists():
-        print(f"[ERROR] Dataset not found: {DATASET_FILE}")
-        print("Run build_dataset.py first.")
-        return
+    rows = [{"model": "Base Rates (baseline)", **score(validation["result"], base_rates(train, len(validation)))}]
+    for name, model in candidate_models().items():
+        fit(model, train)
+        rows.append({"model": name, **score(validation["result"], predict(model, validation))})
 
-    df = pd.read_csv(DATASET_FILE)
-    print(f"Loaded {len(df)} rows, {len(df.columns)} columns.")
+    table = pd.DataFrame(rows)
+    print(table.to_string(index=False, float_format="%.4f"))
 
-    # --- Step 2: Separate features and target ---
-    feature_cols = [c for c in df.columns if c not in NON_FEATURE_COLS]
-    X = df[feature_cols].values
-    y = df["result"].values
+    candidates = table[~table["model"].str.contains("baseline")]
+    best = candidates.sort_values("log_loss").iloc[0]["model"]
+    print(f"\nSelected: {best}")
 
-    print(f"Feature columns ({len(feature_cols)}): {feature_cols}")
-    print(f"Target distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
-
-    # --- Step 3: Train/test split ---
-    # With very small datasets (< 20 rows), we skip the split and train
-    # on everything.  The model won't be properly validated, but it will
-    # at least produce predictions.  As your dataset grows, the split
-    # becomes meaningful.
-    if len(df) < 10:
-        print(f"\n[NOTE] Only {len(df)} samples — too few for a meaningful split.")
-        print("       Training on ALL data.  Add more match analyses for real validation.\n")
-        X_train, y_train = X, y
-        X_test, y_test = X, y  # evaluate on training data (just for sanity)
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=TEST_SIZE, random_state=42, stratify=y
-        )
-        print(f"Train: {len(X_train)} rows | Test: {len(X_test)} rows")
-
-    # --- Step 4: Train the model ---
-    print("\nTraining RandomForest...")
-    base_model = RandomForestClassifier(**RF_PARAMS)
-    base_model.fit(X_train, y_train)
-
-    train_acc = base_model.score(X_train, y_train)
-    print(f"Training accuracy: {train_acc:.3f}")
-
-    # --- Step 5: Calibrate probabilities ---
-    # CalibratedClassifierCV re-fits on the training data using
-    # cross-validation to produce better-calibrated probabilities.
-    # With very small datasets, we use fewer cv folds.
-    n_cv = min(3, len(np.unique(y_train)))
-    if len(X_train) >= 6:
-        print("Calibrating probabilities...")
-        calibrated_model = CalibratedClassifierCV(
-            base_model, cv=n_cv, method="sigmoid"
-        )
-        calibrated_model.fit(X_train, y_train)
-        final_model = calibrated_model
-    else:
-        print("[NOTE] Too few samples for calibration; using raw model.")
-        final_model = base_model
-
-    # --- Step 6: Save artifacts ---
+    final = fit(candidate_models()[best], pd.concat([train, validation]))
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(final_model, MODEL_FILE)
-    print(f"Model saved to {MODEL_FILE}")
+    joblib.dump(final, MODEL_PATH)
+    SELECTION_PATH.write_text(json.dumps({
+        "selected": best,
+        "trained_on": TRAIN_SEASONS + VALIDATION_SEASONS,
+        "features": FEATURE_COLUMNS,
+        "validation": rows,
+    }, indent=2), encoding="utf-8")
+    print(f"Refit on train + validation; saved to {MODEL_PATH}")
 
-    with open(FEATURES_FILE, "w", encoding="utf-8") as f:
-        json.dump(feature_cols, f, indent=2)
-    print(f"Feature columns saved to {FEATURES_FILE}")
-
-    # --- Step 7: Quick feature importance (from base model) ---
-    print("\n--- Feature Importance (Top 10) ---")
-    importances = base_model.feature_importances_
-    sorted_idx = np.argsort(importances)[::-1]
-    for i in sorted_idx[:10]:
-        print(f"  {feature_cols[i]:45s} {importances[i]:.4f}")
-
-    print("\nDone.  Run evaluate.py for detailed metrics.")
+    if hasattr(final, "named_steps"):
+        coefs = pd.DataFrame(final.named_steps["logisticregression"].coef_.T,
+                             index=FEATURE_COLUMNS, columns=["away", "draw", "home"])
+        print("\nStandardised coefficients (log-odds per standard deviation):")
+        print(coefs.round(3).to_string())
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -14,11 +14,15 @@ Windows, using the venv at `.venv/`:
 .venv/Scripts/python src/fetch_data.py   # season CSVs -> data/raw/
 .venv/Scripts/python src/build_db.py     # data/raw/ -> data/epl.db (full rebuild)
 .venv/Scripts/python src/build_dataset.py  # matches -> match_features table
+.venv/Scripts/python src/train_model.py  # choose on validation seasons, refit, save
+.venv/Scripts/python src/evaluate.py     # test seasons -> results/
 .venv/Scripts/python -m pytest -q
 ```
+
+`src/tune_elo.py` (about 7 minutes) chose the Elo constants in `ratings.py`; rerun it only when features change. `evaluate.py` is the single look at the test seasons. Make model choices with `train_model.py`'s validation table, never with test results.
 
 `data/raw/` is committed so results are reproducible. `data/epl.db` is gitignored and rebuilt from it.
 
 ## In transition
 
-`train_model.py`, `evaluate.py` and `predict.py` still implement the old design, which used Tactical Ratings as features. They are being rewritten on top of `data/epl.db`. Treat them as reference, not as patterns to copy.
+`predict.py` still implements the old design, which used Tactical Ratings as features. It is being rewritten on top of `data/epl.db`. Treat it as reference, not as a pattern to copy.

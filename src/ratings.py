@@ -13,7 +13,10 @@ Between seasons:
 """
 
 INITIAL_ELO = 1500.0
-K_FACTOR = 20.0
+# Chosen with src/tune_elo.py on the validation seasons. K of 30-40 beat 10-25;
+# home advantage moved validation log loss by under 0.0005 across 30-90 (the
+# model learns its own home effect), so it stays at a conventional 60.
+K_FACTOR = 30.0
 HOME_ADVANTAGE = 60.0
 SEASON_REGRESSION = 0.2
 
