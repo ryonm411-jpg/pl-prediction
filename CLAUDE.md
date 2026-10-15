@@ -16,6 +16,7 @@ Windows, using the venv at `.venv/`:
 .venv/Scripts/python src/build_dataset.py  # matches -> match_features table
 .venv/Scripts/python src/train_model.py  # choose on validation seasons, refit, save
 .venv/Scripts/python src/evaluate.py     # test seasons -> results/
+.venv/Scripts/python src/train_model.py --live  # refit on all completed seasons for predict.py
 .venv/Scripts/python -m pytest -q
 ```
 

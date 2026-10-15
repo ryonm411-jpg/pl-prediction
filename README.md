@@ -82,6 +82,7 @@ python -m venv .venv
 .venv/Scripts/python src/build_dataset.py
 .venv/Scripts/python src/train_model.py
 .venv/Scripts/python src/evaluate.py
+.venv/Scripts/python src/train_model.py --live   # refit on every completed season, for predict.py
 .venv/Scripts/python -m pytest -q
 ```
 

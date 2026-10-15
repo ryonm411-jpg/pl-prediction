@@ -24,7 +24,7 @@ import pandas as pd
 import adjustments as adj
 import predictions
 from build_dataset import DB_PATH, FEATURE_COLUMNS, LeagueState, walk
-from train_model import MODEL_PATH
+from train_model import LIVE_MODEL_PATH
 
 TEAMS_DIR = Path(__file__).resolve().parent.parent / "teams"
 
@@ -78,7 +78,9 @@ def predict_match(args) -> None:
         sys.exit(f"{home} vs {away} was already played on {played.iloc[0]['match_date']}; "
                  "Predictions must be made before Kickoff.")
 
-    model = joblib.load(MODEL_PATH)
+    if not LIVE_MODEL_PATH.exists():
+        sys.exit("No live model yet: run train_model.py, evaluate.py, then train_model.py --live.")
+    model = joblib.load(LIVE_MODEL_PATH)
     model_p = predict_one(model, state.features(home, away))
 
     applied = choose_adjustments(adj.in_scope(adj.load(), season, home, away), args)

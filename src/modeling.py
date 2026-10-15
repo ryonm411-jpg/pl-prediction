@@ -25,6 +25,7 @@ CLASSES = np.array(["A", "D", "H"])
 TRAIN_SEASONS = [f"{y}-{(y + 1) % 100:02d}" for y in range(2006, 2022)]
 VALIDATION_SEASONS = ["2022-23", "2023-24"]
 TEST_SEASONS = ["2024-25", "2025-26"]
+COMPLETED_SEASONS = TRAIN_SEASONS + VALIDATION_SEASONS + TEST_SEASONS
 
 DATASET_QUERY = """
 SELECT m.match_id, m.season, m.match_date, m.home_team, m.away_team, m.result,

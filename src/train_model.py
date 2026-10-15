@@ -6,7 +6,10 @@
 2. Refit the winner on training + validation seasons and save it to
    data/models/model.joblib. src/evaluate.py scores it on the test seasons once.
 
-The test seasons are never loaded here.
+The test seasons are never loaded here, except by `--live`: after evaluate.py
+has scored the model, `train_model.py --live` refits the selected model on every
+completed season and saves data/models/model_live.joblib for predict.py. The
+evaluated model is kept unchanged, as the evidence behind the README's results.
 """
 
 import json
@@ -18,15 +21,19 @@ import joblib
 import pandas as pd
 
 from build_dataset import DB_PATH, FEATURE_COLUMNS
-from modeling import (TRAIN_SEASONS, VALIDATION_SEASONS, base_rates, candidate_models, fit, load_dataset,
+from modeling import (COMPLETED_SEASONS, TRAIN_SEASONS, VALIDATION_SEASONS, base_rates, candidate_models, fit, load_dataset,
                       predict, score, split)
 
 MODEL_DIR = Path(__file__).resolve().parent.parent / "data" / "models"
 MODEL_PATH = MODEL_DIR / "model.joblib"
 SELECTION_PATH = MODEL_DIR / "selection.json"
+LIVE_MODEL_PATH = MODEL_DIR / "model_live.joblib"
 
 
 def main() -> None:
+    if "--live" in sys.argv[1:]:
+        fit_live()
+        return
     with sqlite3.connect(DB_PATH) as conn:
         df = load_dataset(conn)
     train, validation = split(df, TRAIN_SEASONS), split(df, VALIDATION_SEASONS)
@@ -61,6 +68,17 @@ def main() -> None:
                              index=FEATURE_COLUMNS, columns=["away", "draw", "home"])
         print("\nStandardised coefficients (log-odds per standard deviation):")
         print(coefs.round(3).to_string())
+
+
+def fit_live() -> None:
+    if not SELECTION_PATH.exists():
+        sys.exit("Run train_model.py (and evaluate.py) first, so a model has been selected and scored.")
+    selected = json.loads(SELECTION_PATH.read_text(encoding="utf-8"))["selected"]
+    with sqlite3.connect(DB_PATH) as conn:
+        completed = split(load_dataset(conn), COMPLETED_SEASONS)
+    joblib.dump(fit(candidate_models()[selected], completed), LIVE_MODEL_PATH)
+    print(f"Refit {selected} on {len(completed)} matches ({COMPLETED_SEASONS[0]} to {COMPLETED_SEASONS[-1]}); "
+          f"saved to {LIVE_MODEL_PATH}")
 
 
 if __name__ == "__main__":
