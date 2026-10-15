@@ -1,396 +1,182 @@
-"""
-predict.py
-==========
-PURPOSE:
-    Predict the outcome of a future match by providing the tactical
-    ratings for both teams.
+"""Predict an upcoming Match, apply Analyst Adjustments, and log the Prediction.
 
-HOW TO USE:
-    Option A — Command line:
-        python src/predict.py
+    predict.py match "Man City" "Liverpool" --odds 2.10 3.60 3.40
+    predict.py report
 
-    Option B — From another script:
-        from predict import predict_match
-        result = predict_match(home_ratings, away_ratings, ...)
+`match` rebuilds the league's current state from data/epl.db (run fetch_data.py
+and build_db.py first for the latest Results). It shows the model's probabilities,
+asks which in-scope Analyst Adjustments apply, shows the adjusted probabilities
+and the Team Profile notes, and logs the Prediction before Kickoff.
 
-TWO MODES:
-    1. INTERACTIVE: The script prompts you for team names and uses
-       their data from the latest parsed match JSON.
-    2. MANUAL: You supply rating values directly (useful for
-       "what-if" scenarios like "what if we press harder?").
-
-BEGINNER NOTES:
-    - The model outputs probabilities for 3 outcomes:
-      Home Win, Draw, Away Win.  These SHOULD sum to ~100%.
-    - Higher confidence = one probability is much larger than others.
-    - The model is only as good as your ratings.  Garbage in = garbage out.
-
-EXTENSIBILITY:
-    - Accept a match Markdown file as input (parse → predict).
-    - Add betting value calculations (compare to bookmaker odds).
-    - Add historical comparison ("last 5 times these teams played...").
+`report` scores every logged Prediction whose Result is now in the database.
 """
 
-import json
+import argparse
+import difflib
+import sqlite3
 import sys
-import numpy as np
 from pathlib import Path
+
 import joblib
+import numpy as np
+import pandas as pd
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent.parent
-MODEL_FILE = BASE_DIR / "data" / "models" / "football_model.pkl"
-FEATURES_FILE = BASE_DIR / "data" / "models" / "feature_columns.json"
-TEAMS_FILE = BASE_DIR / "data" / "teams.json"
-RAW_MATCHES_DIR = BASE_DIR / "data" / "raw_matches"
+import adjustments as adj
+import predictions
+from build_dataset import DB_PATH, FEATURE_COLUMNS, LeagueState, walk
+from train_model import MODEL_PATH
 
-# Must match build_dataset.py exactly
-RATING_CATEGORIES = [
-    "Pressing Intensity",
-    "Build-up Quality",
-    "Chance Creation",
-    "Defensive Organization",
-    "Defensive Transition Vulnerability",
-]
+TEAMS_DIR = Path(__file__).resolve().parent.parent / "teams"
 
-FORMATION_MAP = {
-    "4-3-3":   1,
-    "4-2-3-1": 2,
-    "4-4-2":   3,
-    "3-5-2":   4,
-    "3-4-3":   5,
-    "4-1-4-1": 6,
-    "4-2-4":   7,
-    "2-3-5":   8,
-    "5-3-2":   9,
-    "4-3-1-2": 10,
-    "3-4-2-1": 11,
-    "4-1-2-1-2": 12,
+# football-data.co.uk name -> Team Profile file name, where they differ.
+PROFILE_NAMES = {
+    "Bournemouth": "AFC Bournemouth",
+    "Brighton": "Brighton & Hove Albion",
+    "Leeds": "Leeds United",
+    "Man City": "Manchester City",
+    "Man United": "Manchester United",
+    "Newcastle": "Newcastle United",
+    "Nott'm Forest": "Nottingham Forest",
+    "Tottenham": "Tottenham Hotspur",
+    "West Ham": "West Ham United",
+    "Wolves": "Wolverhampton Wanderers",
 }
+PROFILE_SECTIONS = ["## Team Strengths & Weaknesses", "## Known Matchup Vulnerabilities"]
 
-LABEL_NAMES = {0: "Away Win", 1: "Draw", 2: "Home Win"}
 
+def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # Team Profiles contain names like Ødegaard
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("match", help="predict and log one upcoming Match")
+    m.add_argument("home")
+    m.add_argument("away")
+    m.add_argument("--odds", nargs=3, type=float, metavar=("HOME", "DRAW", "AWAY"),
+                   help="decimal odds, to compare against the market")
+    choice = m.add_mutually_exclusive_group()
+    choice.add_argument("--apply", default=None, help="comma-separated adjustment ids to apply without asking")
+    choice.add_argument("--no-adjust", action="store_true", help="apply no Analyst Adjustments")
+    m.add_argument("--dry-run", action="store_true", help="show the Prediction without logging it")
+    sub.add_parser("report", help="score logged Predictions against Results")
+    args = parser.parse_args()
 
-def main():
-    """
-    Interactive prediction mode.
-    """
-    # The Windows console defaults to cp1252, which can't print "→" or "Ø".
-    sys.stdout.reconfigure(encoding="utf-8")
-    print("=" * 60)
-    print("MATCH PREDICTION")
-    print("=" * 60)
-
-    # Load model
-    if not MODEL_FILE.exists():
-        print(f"[ERROR] Model not found: {MODEL_FILE}")
-        print("Run train_model.py first.")
-        return
-
-    model = joblib.load(MODEL_FILE)
-
-    with open(FEATURES_FILE, "r", encoding="utf-8") as f:
-        feature_cols = json.load(f)
-
-    print(f"Model loaded ({len(feature_cols)} features).\n")
-
-    # --- Choose input mode ---
-    print("Choose input mode:")
-    print("  1) Enter team names (uses latest match data)")
-    print("  2) Enter ratings manually")
-    choice = input("\nChoice [1/2]: ").strip()
-
-    if choice == "2":
-        predict_manual(model, feature_cols)
+    if args.command == "match":
+        predict_match(args)
     else:
-        predict_from_data(model, feature_cols)
+        print_report()
 
 
-def predict_from_data(model, feature_cols):
-    """
-    Look up the most recent match data for each team and use those
-    ratings to predict a hypothetical matchup.
-    """
-    # Build a lookup of latest ratings per team from raw_matches
-    team_ratings = build_latest_ratings_lookup()
+def predict_match(args) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        matches = pd.read_sql("SELECT * FROM matches", conn)
+    state = walk(matches, LeagueState())
+    home, away = resolve_team(args.home, state.league), resolve_team(args.away, state.league)
+    season = state.season
 
-    if not team_ratings:
-        print("[ERROR] No match data found. Parse some matches first.")
+    played = matches[(matches["season"] == season) & (matches["home_team"] == home) & (matches["away_team"] == away)]
+    if len(played):
+        sys.exit(f"{home} vs {away} was already played on {played.iloc[0]['match_date']}; "
+                 "Predictions must be made before Kickoff.")
+
+    model = joblib.load(MODEL_PATH)
+    model_p = predict_one(model, state.features(home, away))
+
+    applied = choose_adjustments(adj.in_scope(adj.load(), season, home, away), args)
+    adjusted_p = predict_one(model, state.features(home, away, adj.elo_shift(applied)))
+
+    market_p = None
+    if args.odds:
+        implied = 1.0 / np.array([args.odds[2], args.odds[1], args.odds[0]])  # away, draw, home
+        market_p = implied / implied.sum()
+
+    print(f"\n{home} vs {away} ({season}, data up to {matches['match_date'].max()})\n")
+    rows = [("Model", model_p)]
+    if applied:
+        rows.append(("Model + Analyst Adjustments", adjusted_p))
+    if market_p is not None:
+        rows.append(("Market (your odds)", market_p))
+    print(f"{'':30} {'Home':>6} {'Draw':>6} {'Away':>6}")
+    for name, p in rows:
+        print(f"{name:30} {p[2]:6.1%} {p[1]:6.1%} {p[0]:6.1%}")
+
+    for team in (home, away):
+        print_profile(team)
+
+    if args.dry_run:
+        print("\nDry run: Prediction not logged.")
         return
+    with predictions.connect() as conn:
+        predictions.log(conn, season, home, away, model_p, adjusted_p, market_p, [a.snapshot() for a in applied])
+    print(f"\nLogged to {predictions.PREDICTIONS_DB}")
 
-    available = sorted(team_ratings.keys())
-    print(f"\nAvailable teams ({len(available)}):")
-    for t in available:
-        print(f"  - {t}")
 
-    home_name = input("\nHome team: ").strip()
-    away_name = input("Away team: ").strip()
+def resolve_team(name: str, league: set[str]) -> str:
+    if name in league:
+        return name
+    close = difflib.get_close_matches(name, sorted(league), n=3, cutoff=0.4)
+    sys.exit(f"Unknown team '{name}' for the current season." + (f" Did you mean: {', '.join(close)}?" if close else
+             f" Teams: {', '.join(sorted(league))}"))
 
-    if home_name not in team_ratings:
-        print(f"[ERROR] '{home_name}' not found in parsed match data.")
+
+def predict_one(model, features: dict[str, float]) -> np.ndarray:
+    return model.predict_proba(pd.DataFrame([features])[FEATURE_COLUMNS])[0]
+
+
+def choose_adjustments(candidates: list[adj.Adjustment], args) -> list[adj.Adjustment]:
+    if args.no_adjust or not candidates:
+        return []
+    if args.apply is not None:
+        wanted = {i.strip() for i in args.apply.split(",") if i.strip()}
+        unknown = wanted - {a.id for a in candidates}
+        if unknown:
+            sys.exit(f"Not in scope for this Match: {', '.join(sorted(unknown))}. "
+                     f"In scope: {', '.join(a.id for a in candidates)}")
+        return [a for a in candidates if a.id in wanted]
+
+    chosen = []
+    print("\nAnalyst Adjustments in scope:")
+    for a in candidates:
+        print(f"\n  [{a.id}] {a.elo:+g} Elo to {a.favours}: {a.reason}")
+        question = "  Apply?"
+        if a.requires_players:
+            everyone = "both" if len(a.requires_players) == 2 else "all"
+            question = f"  Are {' and '.join(a.requires_players)} {everyone} playing?"
+        if input(f"{question} [y/N] ").strip().lower() == "y":
+            chosen.append(a)
+    return chosen
+
+
+def print_profile(team: str) -> None:
+    path = TEAMS_DIR / f"{PROFILE_NAMES.get(team, team)}.md"
+    print(f"\n=== {team}: Team Profile ===")
+    if not path.exists():
+        print("(no Team Profile)")
         return
-    if away_name not in team_ratings:
-        print(f"[ERROR] '{away_name}' not found in parsed match data.")
+    text = path.read_text(encoding="utf-8")
+    for heading in PROFILE_SECTIONS:
+        start = text.find(heading)
+        if start == -1:
+            continue
+        end = min(i for i in (text.find("\n---", start), text.find("\n## ", start + 1), len(text)) if i != -1)
+        print(text[start:end].strip() + "\n")
+
+
+def print_report() -> None:
+    with predictions.connect() as conn:
+        df = predictions.scored(conn, DB_PATH)
+        pending = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] - len(df)
+    if df.empty:
+        print(f"No logged Predictions have a Result yet ({pending} waiting).")
         return
-
-    home_r = team_ratings[home_name]
-    away_r = team_ratings[away_name]
-
-    home_formation = input(f"Home formation (default {home_r.get('formation', '4-3-3')}): ").strip()
-    away_formation = input(f"Away formation (default {away_r.get('formation', '4-2-3-1')}): ").strip()
-
-    if not home_formation:
-        home_formation = home_r.get("formation", "4-3-3")
-    if not away_formation:
-        away_formation = away_r.get("formation", "4-2-3-1")
-
-    # xG — use latest match xG as a baseline, or let user override
-    default_home_xg = home_r.get("xg", 1.2)
-    default_away_xg = away_r.get("xg", 1.2)
-    home_xg_input = input(f"Home expected xG (default {default_home_xg}): ").strip()
-    away_xg_input = input(f"Away expected xG (default {default_away_xg}): ").strip()
-    home_xg = float(home_xg_input) if home_xg_input else default_home_xg
-    away_xg = float(away_xg_input) if away_xg_input else default_away_xg
-
-    feature_vector = build_feature_vector(
-        home_r["ratings"], away_r["ratings"],
-        home_formation, away_formation,
-        is_home=1,
-        feature_cols=feature_cols,
-        home_xg=home_xg, away_xg=away_xg
-    )
-
-    run_prediction(model, feature_vector, home_name, away_name, feature_cols)
-
-
-def predict_manual(model, feature_cols):
-    """
-    Prompt the user for each rating value manually.
-    """
-    print("\n--- Enter Home Team Ratings (0-100) ---")
-    home_ratings = {}
-    for cat in RATING_CATEGORIES:
-        val = input(f"  {cat}: ").strip()
-        home_ratings[cat] = int(val) if val else 50
-
-    print("\n--- Enter Away Team Ratings (0-100) ---")
-    away_ratings = {}
-    for cat in RATING_CATEGORIES:
-        val = input(f"  {cat}: ").strip()
-        away_ratings[cat] = int(val) if val else 50
-
-    home_formation = input("\nHome formation (e.g., 4-3-3): ").strip() or "4-3-3"
-    away_formation = input("Away formation (e.g., 4-2-3-1): ").strip() or "4-2-3-1"
-
-    # xG input
-    home_xg_input = input("\nHome expected xG (e.g., 1.5, or press Enter for 1.2): ").strip()
-    away_xg_input = input("Away expected xG (e.g., 1.0, or press Enter for 1.2): ").strip()
-    home_xg = float(home_xg_input) if home_xg_input else 1.2
-    away_xg = float(away_xg_input) if away_xg_input else 1.2
-
-    feature_vector = build_feature_vector(
-        home_ratings, away_ratings,
-        home_formation, away_formation,
-        is_home=1,
-        feature_cols=feature_cols,
-        home_xg=home_xg, away_xg=away_xg
-    )
-
-    run_prediction(model, feature_vector, "Home Team", "Away Team", feature_cols)
-
-
-def run_prediction(model, feature_vector, home_name, away_name, feature_cols):
-    """
-    Execute prediction and display results.
-    """
-    X = np.array([feature_vector])
-    proba = model.predict_proba(X)[0]
-    pred_class = model.predict(X)[0]
-
-    classes = model.classes_
-    prob_dict = {int(classes[i]): proba[i] for i in range(len(classes))}
-
-    home_pct = prob_dict.get(2, 0) * 100
-    draw_pct = prob_dict.get(1, 0) * 100
-    away_pct = prob_dict.get(0, 0) * 100
-
-    print("\n" + "=" * 50)
-    print(f"  {home_name}  vs  {away_name}")
-    print("=" * 50)
-    print(f"  Home Win:  {home_pct:>5.1f}%")
-    print(f"  Draw:      {draw_pct:>5.1f}%")
-    print(f"  Away Win:  {away_pct:>5.1f}%")
-    print("-" * 50)
-    print(f"  Prediction: {LABEL_NAMES.get(pred_class, '?')}")
-    print("=" * 50)
-
-    # Confidence assessment
-    max_prob = max(home_pct, draw_pct, away_pct)
-    if max_prob > 70:
-        confidence = "HIGH"
-    elif max_prob > 50:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW (close match)"
-    print(f"  Confidence: {confidence}")
-
-
-# ---------------------------------------------------------------------------
-# Feature construction
-# ---------------------------------------------------------------------------
-
-def build_feature_vector(home_ratings, away_ratings, home_formation, away_formation,
-                         is_home, feature_cols, home_xg=1.2, away_xg=1.2):
-    """
-    Construct a feature vector that matches the training data columns exactly.
-
-    This is the CRITICAL function — the feature order MUST match what
-    build_dataset.py produced, otherwise the model will get nonsense input.
-    """
-    row = {}
-
-    for cat in RATING_CATEGORIES:
-        safe_key = cat.lower().replace(" ", "_").replace("-", "_")
-
-        h_val = home_ratings.get(cat, 50)
-        a_val = away_ratings.get(cat, 50)
-
-        # Ensure numeric
-        if isinstance(h_val, dict):
-            h_val = h_val.get("rating", 50)
-        if isinstance(a_val, dict):
-            a_val = a_val.get("rating", 50)
-
-        h_val = float(h_val) if h_val is not None else 50.0
-        a_val = float(a_val) if a_val is not None else 50.0
-
-        row[f"home_{safe_key}"] = h_val
-        row[f"away_{safe_key}"] = a_val
-        row[f"delta_{safe_key}"] = h_val - a_val
-
-    # xG features
-    row["home_xg"] = float(home_xg)
-    row["away_xg"] = float(away_xg)
-    row["delta_xg"] = float(home_xg) - float(away_xg)
-
-    row["home_formation"] = FORMATION_MAP.get(home_formation, 0)
-    row["away_formation"] = FORMATION_MAP.get(away_formation, 0)
-    row["is_home"] = is_home
-
-    # Build vector in the EXACT order the model expects
-    vector = []
-    for col in feature_cols:
-        vector.append(row.get(col, 0))
-
-    return vector
-
-
-def build_latest_ratings_lookup():
-    """
-    Scan all parsed match JSONs and extract the LATEST ratings
-    for each team (whether they played home or away).
-
-    Returns dict like:
-        {"Blue FC": {"ratings": {...}, "formation": "4-3-3"}, ...}
-    """
-    if not RAW_MATCHES_DIR.exists():
-        return {}
-
-    team_data = {}
-
-    for mf in sorted(RAW_MATCHES_DIR.glob("*.json")):
-        with open(mf, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        meta = data.get("meta", {})
-        ratings = data.get("ratings", {})
-        formations = data.get("formations", {})
-
-        home_team = meta.get("home_team")
-        away_team = meta.get("away_team")
-
-        starting = formations.get("starting", {})
-
-        # Parse xG from the match (e.g. "1.8 – 1.2")
-        home_xg, away_xg = _parse_xg_string(meta.get("xg", ""))
-
-        if home_team and ratings.get("home"):
-            team_data[home_team] = {
-                "ratings": ratings["home"],
-                "formation": starting.get("home", "4-3-3"),
-                "xg": home_xg,
-            }
-
-        if away_team and ratings.get("away"):
-            team_data[away_team] = {
-                "ratings": ratings["away"],
-                "formation": starting.get("away", "4-2-3-1"),
-                "xg": away_xg,
-            }
-
-    return team_data
-
-
-def _parse_xg_string(xg_str):
-    """Parse xG string like '1.8 – 1.2' → (1.8, 1.2). Returns (1.2, 1.2) on failure."""
-    if not xg_str or not xg_str.strip():
-        return 1.2, 1.2
-    try:
-        normalized = xg_str.replace("\u2013", "-").replace("\u2014", "-").strip()
-        parts = normalized.split("-")
-        return float(parts[0].strip()), float(parts[1].strip())
-    except (ValueError, IndexError):
-        return 1.2, 1.2
-
-
-# ---------------------------------------------------------------------------
-# Non-interactive API (for use by other scripts)
-# ---------------------------------------------------------------------------
-
-def predict_match(home_ratings, away_ratings, home_formation="4-3-3",
-                  away_formation="4-2-3-1", is_home=1, home_xg=1.2, away_xg=1.2):
-    """
-    Programmatic prediction interface.
-
-    Args:
-        home_ratings: dict of {category_name: rating_value}
-        away_ratings: dict of {category_name: rating_value}
-        home_formation: string like "4-3-3"
-        away_formation: string like "4-2-3-1"
-        is_home: 1 if home, 0 if neutral
-        home_xg: expected goals for home team
-        away_xg: expected goals for away team
-
-    Returns:
-        dict with keys: home_win, draw, away_win, prediction
-    """
-    model = joblib.load(MODEL_FILE)
-    with open(FEATURES_FILE, "r", encoding="utf-8") as f:
-        feature_cols = json.load(f)
-
-    feature_vector = build_feature_vector(
-        home_ratings, away_ratings,
-        home_formation, away_formation,
-        is_home, feature_cols,
-        home_xg=home_xg, away_xg=away_xg
-    )
-
-    X = np.array([feature_vector])
-    proba = model.predict_proba(X)[0]
-    pred_class = model.predict(X)[0]
-
-    classes = model.classes_
-    prob_dict = {int(classes[i]): proba[i] for i in range(len(classes))}
-
-    return {
-        "home_win": prob_dict.get(2, 0),
-        "draw": prob_dict.get(1, 0),
-        "away_win": prob_dict.get(0, 0),
-        "prediction": LABEL_NAMES.get(pred_class, "Unknown"),
-    }
+    overall, per_adjustment = predictions.report(df)
+    print(f"Scored Predictions: {len(df)} ({pending} still waiting for a Result)\n")
+    print(overall.to_string(index=False, float_format="%.4f"))
+    if not per_adjustment.empty:
+        print("\nPer Analyst Adjustment (log_loss_change < 0 means it helped):")
+        print(per_adjustment.to_string(index=False, float_format="%.4f"))
+    if len(df) < 100:
+        print(f"\nOnly {len(df)} Predictions: read these differences as anecdotes, not evidence.")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

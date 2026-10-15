@@ -23,6 +23,6 @@ Windows, using the venv at `.venv/`:
 
 `data/raw/` is committed so results are reproducible. `data/epl.db` is gitignored and rebuilt from it.
 
-## In transition
+## Predictions
 
-`predict.py` still implements the old design, which used Tactical Ratings as features. It is being rewritten on top of `data/epl.db`. Treat it as reference, not as a pattern to copy.
+`src/predict.py match HOME AWAY` predicts an upcoming Match, applies Analyst Adjustments from `adjustments.yaml`, and logs to `data/predictions.db`. `src/predict.py report` scores the log. The log is a record made before Kickoff, so it is committed and never rebuilt. Use `--dry-run` for any prediction that isn't a real forecast.

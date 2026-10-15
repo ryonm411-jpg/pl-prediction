@@ -62,6 +62,84 @@ class TeamForm:
         self.stats = deque([dict(record) for _ in range(STATS_WINDOW)], maxlen=STATS_WINDOW)
 
 
+class LeagueState:
+    """Every team's Elo Rating and recent form at one point in time.
+
+    Walk Matches through it in date order: `features` reads the state before
+    Kickoff, `record` applies a Result afterwards.
+    """
+
+    def __init__(self, elo: EloTable | None = None):
+        self.elo = elo or EloTable()
+        self.form: dict[str, TeamForm] = {}
+        self.league: set[str] = set()
+        self.season: str | None = None
+
+    def start_season(self, season: str, teams: set[str]) -> None:
+        relegated = self.league - teams
+        snapshots = [self.form[t].snapshot() for t in relegated]
+        for team in teams:
+            if team not in self.form or (self.league and team not in self.league):
+                self.form[team] = TeamForm()
+                if snapshots:
+                    self.form[team].seed({k: sum(s[k] for s in snapshots) / len(snapshots) for k in snapshots[0]})
+        self.elo.start_season(teams)
+        self.league = set(teams)
+        self.season = season
+
+    def features(self, home_team: str, away_team: str, elo_shift: dict[str, float] | None = None) -> dict[str, float]:
+        """Pre-match Features for a Match between two teams in the current season.
+
+        `elo_shift` adds Elo points per team (Analyst Adjustments) without
+        changing the stored ratings.
+        """
+        shift = elo_shift or {}
+        home_elo = self.elo[home_team] + shift.get(home_team, 0.0)
+        away_elo = self.elo[away_team] + shift.get(away_team, 0.0)
+        home, away = self.form[home_team].snapshot(), self.form[away_team].snapshot()
+        return {
+            "home_elo": home_elo,
+            "away_elo": away_elo,
+            "elo_diff": home_elo - away_elo,
+            "home_ppg": home["ppg"],
+            "away_ppg": away["ppg"],
+            **{f"home_{s}": home[s] for s in ROLLING_STATS},
+            **{f"away_{s}": away[s] for s in ROLLING_STATS},
+        }
+
+    def record(self, m) -> None:
+        """Apply one played Match (any object with the matches-table fields)."""
+        self.elo.update(m.home_team, m.away_team, m.result)
+        home_points, away_points = POINTS[m.result]
+        self.form[m.home_team].points.append(home_points)
+        self.form[m.away_team].points.append(away_points)
+        self.form[m.home_team].stats.append({
+            "goals_for": m.home_goals, "goals_against": m.away_goals,
+            "sot_for": m.home_shots_on_target, "sot_against": m.away_shots_on_target,
+        })
+        self.form[m.away_team].stats.append({
+            "goals_for": m.away_goals, "goals_against": m.home_goals,
+            "sot_for": m.away_shots_on_target, "sot_against": m.home_shots_on_target,
+        })
+
+
+def walk(matches: pd.DataFrame, state: LeagueState, on_day=None) -> LeagueState:
+    """Feed Matches through `state` season by season and date by date.
+
+    `on_day(state, day)` runs before each date's Results are applied, which is
+    where Pre-match Features are read.
+    """
+    matches = matches.sort_values(["match_date", "match_id"])
+    for season, season_matches in matches.groupby("season", sort=True):
+        state.start_season(season, set(season_matches["home_team"]) | set(season_matches["away_team"]))
+        for _, day in season_matches.groupby("match_date", sort=True):
+            if on_day:
+                on_day(state, day)
+            for m in day.itertuples():
+                state.record(m)
+    return state
+
+
 def compute_features(matches: pd.DataFrame, elo: EloTable | None = None) -> pd.DataFrame:
     """Return one row of Pre-match Features per Match.
 
@@ -69,61 +147,14 @@ def compute_features(matches: pd.DataFrame, elo: EloTable | None = None) -> pd.D
     home_goals, away_goals, result, home_shots_on_target, away_shots_on_target.
     Pass a fresh `elo` table to try Elo settings other than the defaults.
     """
-    matches = matches.sort_values(["match_date", "match_id"])
-    elo = elo or EloTable()
-    form: dict[str, TeamForm] = {}
-    league: set[str] = set()
     rows = []
 
-    for season, season_matches in matches.groupby("season", sort=True):
-        teams = set(season_matches["home_team"]) | set(season_matches["away_team"])
-        start_season_form(form, league, teams)
-        elo.start_season(teams)
-        league = teams
+    def read_day(state: LeagueState, day: pd.DataFrame) -> None:
+        for m in day.itertuples():
+            rows.append({"match_id": m.match_id, **state.features(m.home_team, m.away_team)})
 
-        for _, day in season_matches.groupby("match_date", sort=True):
-            # Read every feature for the day before applying any of its Results.
-            for m in day.itertuples():
-                home, away = form[m.home_team].snapshot(), form[m.away_team].snapshot()
-                rows.append({
-                    "match_id": m.match_id,
-                    "home_elo": elo[m.home_team],
-                    "away_elo": elo[m.away_team],
-                    "elo_diff": elo[m.home_team] - elo[m.away_team],
-                    "home_ppg": home["ppg"],
-                    "away_ppg": away["ppg"],
-                    **{f"home_{s}": home[s] for s in ROLLING_STATS},
-                    **{f"away_{s}": away[s] for s in ROLLING_STATS},
-                })
-            for m in day.itertuples():
-                elo.update(m.home_team, m.away_team, m.result)
-                record_result(form, m)
-
+    walk(matches, LeagueState(elo), on_day=read_day)
     return pd.DataFrame(rows, columns=["match_id", *FEATURE_COLUMNS])
-
-
-def start_season_form(form: dict[str, TeamForm], previous: set[str], teams: set[str]) -> None:
-    relegated = previous - teams
-    snapshots = [form[t].snapshot() for t in relegated]
-    for team in teams:
-        if team not in form or (previous and team not in previous):
-            form[team] = TeamForm()
-            if snapshots:
-                form[team].seed({k: sum(s[k] for s in snapshots) / len(snapshots) for k in snapshots[0]})
-
-
-def record_result(form: dict[str, TeamForm], m) -> None:
-    home_points, away_points = POINTS[m.result]
-    form[m.home_team].points.append(home_points)
-    form[m.away_team].points.append(away_points)
-    form[m.home_team].stats.append({
-        "goals_for": m.home_goals, "goals_against": m.away_goals,
-        "sot_for": m.home_shots_on_target, "sot_against": m.away_shots_on_target,
-    })
-    form[m.away_team].stats.append({
-        "goals_for": m.away_goals, "goals_against": m.home_goals,
-        "sot_for": m.away_shots_on_target, "sot_against": m.home_shots_on_target,
-    })
 
 
 def main() -> None:

@@ -8,6 +8,8 @@ __pycache__/
 
 # Built artefacts: regenerate with the scripts in src/
 data/*.db
+# The Prediction log can't be regenerated, so it is committed.
+!data/predictions.db
 data/models/
 data/datasets/
 data/raw_matches/

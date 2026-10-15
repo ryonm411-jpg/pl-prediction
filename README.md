@@ -55,9 +55,20 @@ football-data.co.uk CSVs ─► SQLite (matches) ─► Pre-match Features (matc
 - **No calibration step.** Calibration fixes models whose probabilities are systematically too confident or too timid. Logistic regression's probabilities were already well calibrated, so adding a calibration layer (fitted with time-ordered folds) made validation log loss slightly worse.
 - **The original design leaked.** The project started from hand-written tactical match notes with 0–100 ratings. Those ratings are written *after* watching the match, so using them to predict that same match leaks the result. They're now an analyst layer, not training data ([ADR 0001](docs/adr/0001-tactical-notes-explain-not-predict.md)).
 
-## Analyst layer (in progress)
+## Analyst layer
 
-`teams/` holds tactical profiles for the 2025-26 teams, and `match_analysis/` holds match notes. The planned next step is **Analyst Adjustments**: tactical claims like "Doku's pace against Frimpong is worth +25 Elo to City", stored in a YAML file and applied on top of the model. Each prediction is logged before kickoff, so it's possible to measure whether the adjustments improve on the model ([ADR 0002](docs/adr/0002-analyst-adjustments-in-elo-points.md)). `CONTEXT.md` defines the project's terms.
+The model only sees results data. The analyst layer adds tactical judgement on top, and measures whether that judgement helps.
+
+- **Analyst Adjustments** (`adjustments.yaml`): tactical claims with a reason and an Elo shift. For example, "Doku's pace against Frimpong: +25 Elo to Man City against Liverpool". A claim applies either to one opponent or to all of a team's opponents. You confirm it per match (for example, that both players are starting), and it expires at the end of the season ([ADR 0002](docs/adr/0002-analyst-adjustments-in-elo-points.md)).
+- **Prediction log** (`data/predictions.db`): each forecast is saved before kickoff. It holds the model's probabilities, the adjusted probabilities, the adjustments as they stood at the time, and the bookmaker odds if entered. `predict.py report` scores the log once results arrive, comparing model alone, model plus adjustments, and market, with a track record for each adjustment.
+- **Team Profiles** (`teams/`) and **match notes** (`match_analysis/`): hand-written 2025-26 scouting notes. They're shown next to each prediction, not used as training data ([ADR 0001](docs/adr/0001-tactical-notes-explain-not-predict.md)).
+
+```
+.venv/Scripts/python src/predict.py match "Man City" "Liverpool" --odds 2.10 3.60 3.40
+.venv/Scripts/python src/predict.py report
+```
+
+`CONTEXT.md` defines the project's terms.
 
 ## Running it
 

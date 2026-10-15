@@ -1,0 +1,13 @@
+# Analyst Adjustments: tactical claims applied on top of the model (see ADR 0002).
+# Team names use football-data.co.uk spellings (Man City, Nott'm Forest, ...).
+# Each entry expires at the end of its season. Renew it deliberately by copying
+# it with the new season, and keep the old one for the record.
+# Format: see src/adjustments.py.
+
+- id: doku-vs-frimpong
+  reason: Doku's 1v1 pace isolates Frimpong, who is weaker defending facing the ball
+  favours: Man City
+  elo: 25
+  season: 2026-27
+  against: Liverpool
+  requires_players: [Jérémy Doku, Jeremie Frimpong]
