@@ -26,4 +26,4 @@ Windows, using the venv at `.venv/`:
 
 ## Predictions
 
-`src/predict.py match HOME AWAY` predicts an upcoming Match, applies Analyst Adjustments from `adjustments.yaml`, and logs to `data/predictions.db`. `src/predict.py report` scores the log. The log is a record made before Kickoff, so it is committed and never rebuilt. Use `--dry-run` for any prediction that isn't a real forecast.
+`src/predict.py fixtures` (every upcoming EPL fixture from football-data.co.uk) or `src/predict.py match HOME AWAY` predicts upcoming Matches, applies Analyst Adjustments from `adjustments.yaml`, and logs to `data/predictions.db`. `src/predict.py report` scores the log. The log is a record made before Kickoff, so it is committed and never rebuilt. Use `--dry-run` for any prediction that isn't a real forecast.

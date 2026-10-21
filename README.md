@@ -64,6 +64,7 @@ The model only sees results data. The analyst layer adds tactical judgement on t
 - **Team Profiles** (`teams/`) and **match notes** (`match_analysis/`): hand-written 2025-26 scouting notes. They're shown next to each prediction, not used as training data ([ADR 0001](docs/adr/0001-tactical-notes-explain-not-predict.md)).
 
 ```
+.venv/Scripts/python src/predict.py fixtures     # every upcoming EPL fixture, market = average odds
 .venv/Scripts/python src/predict.py match "Man City" "Liverpool" --odds 2.10 3.60 3.40
 .venv/Scripts/python src/predict.py report
 ```
